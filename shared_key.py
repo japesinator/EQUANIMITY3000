@@ -11,19 +11,22 @@ flags.DEFINE_integer('key_size', 8, 'Key size')
 
 flags.DEFINE_integer('batch_size', 3000, 'Batch size')
 
+flags.DEFINE_integer('train_iter', 2000, 'Iterations to train both AB and Eve')
+flags.DEFINE_integer('attack_iter', 2000, 'Iterations to train Eve alone')
+
 flags.DEFINE_integer('obfuscation_depth', 3, 'Depth to compute public key')
 flags.DEFINE_integer('construction_depth', 3, 'Depth to compute shared key')
 
 flags.DEFINE_integer('eve_depth', 1, 'Depth for Eve to attack')
 
-flags.DEFINE_float('ab_diversity', 0.1, 'Alice/Bob key diversity penalty')
-flags.DEFINE_float('ab_eve1', 2.0, 'Alice/Bob penalty for Eve guessing')
-flags.DEFINE_float('ab_eve2', 1.0, 'Alice/Bob penalty for Eve guessing')
+flags.DEFINE_float('ab_diversity', 0.144, 'Alice/Bob key diversity penalty')
+flags.DEFINE_float('ab_eve1', 0.558, 'Alice/Bob penalty for Eve guessing')
+flags.DEFINE_float('ab_eve2', 1.2, 'Alice/Bob penalty for Eve guessing')
 flags.DEFINE_float('ab_decay', 0.0, 'Alice/Bob weight decay')
-flags.DEFINE_float('ab_learn', 0.003, 'Alice/Bob learning rate')
+flags.DEFINE_float('ab_learn', 0.00432, 'Alice/Bob learning rate')
 
-flags.DEFINE_float('eve_decay', 0.01, 'Eve weight decay')
-flags.DEFINE_float('eve_learn', 0.001, 'Eve learning rate')
+flags.DEFINE_float('eve_decay', 0.46, 'Eve weight decay')
+flags.DEFINE_float('eve_learn', 0.000135, 'Eve learning rate')
 
 
 FLAGS = flags.FLAGS
@@ -126,6 +129,15 @@ class SharedKeyCrypto():
     return tf.add_n(costs)
 
   def __init__(self):
+    self.ab_diversity = tf.constant(FLAGS.ab_diversity, name="ab_diversity")
+    self.ab_eve1 = tf.constant(FLAGS.ab_eve1, name="ab_eve1")
+    self.ab_eve2 = tf.constant(FLAGS.ab_eve2, name="ab_eve2")
+    self.ab_decay = tf.constant(FLAGS.ab_decay, name="ab_decay")
+    self.ab_learn = tf.constant(FLAGS.ab_learn, name="ab_learn")
+
+    self.eve_decay = tf.constant(FLAGS.eve_decay, name="eve_decay")
+    self.eve_learn = tf.constant(FLAGS.eve_learn, name="eve_learn")
+
     secret_A = self.secret_A = get_rand_bits(BATCH, KEY_SIZE)
     secret_B = get_rand_bits(BATCH, KEY_SIZE)
 
@@ -163,7 +175,7 @@ class SharedKeyCrypto():
     self.eve_err_2 = KEY_SIZE - self.eve_count2
     self.eve_count = self.eve_count2
     self.eve_loss  = self.eve_err_1**2 + self.eve_err_2**2
-    self.eve_loss += FLAGS.eve_decay * self.get_weight_decay('side_E')
+    self.eve_loss += self.eve_decay * self.get_weight_decay('side_E')
     
     eve_guess_penalty_1 = tf.maximum(KEY_SIZE/2, self.eve_count1) ** 2 - (KEY_SIZE**2/4) #basically eve_count_1 ** 2
     eve_guess_penalty_2 = tf.maximum(KEY_SIZE/2, self.eve_count2) ** 2 - (KEY_SIZE**2/4) #basically eve_count_2 ** 2
@@ -171,21 +183,22 @@ class SharedKeyCrypto():
     self.alice_bob_err = KEY_SIZE - self.agreed_count
 
     self.alice_bob_loss  =                      self.alice_bob_err ** 2
-    self.alice_bob_loss += FLAGS.ab_diversity * (self.diversity_penalty**2 + self.public_diversity_penalty**2)
-    self.alice_bob_loss += FLAGS.ab_eve1      * eve_guess_penalty_1
-    self.alice_bob_loss += FLAGS.ab_eve2      * eve_guess_penalty_2
-    self.alice_bob_loss += FLAGS.ab_decay     * self.get_weight_decay('side_AB')
+    self.alice_bob_loss += self.ab_diversity * (self.diversity_penalty**2 + self.public_diversity_penalty**2)
+    self.alice_bob_loss += self.ab_eve1      * eve_guess_penalty_1
+    self.alice_bob_loss += self.ab_eve2      * eve_guess_penalty_2
+    self.alice_bob_loss += self.ab_decay     * self.get_weight_decay('side_AB')
 
-    optimizer_AB = tf.train.MomentumOptimizer(learning_rate=FLAGS.ab_learn, momentum=0.9)
+    optimizer_AB = tf.train.MomentumOptimizer(learning_rate=self.ab_learn, momentum=0.9)
     self.train_AB = optimizer_AB.minimize(self.alice_bob_loss, var_list = tf.contrib.framework.get_variables('side_AB'))
 
-    optimizer_E = tf.train.MomentumOptimizer(learning_rate=FLAGS.eve_learn, momentum=0.9)
+    optimizer_E = tf.train.MomentumOptimizer(learning_rate=self.eve_learn, momentum=0.9)
     self.train_E = optimizer_E.minimize(self.eve_loss, var_list = tf.contrib.framework.get_variables('side_E'))
 
     self.shared_samples = shared_agreed
 
 #end model definition
 
+#Instantiate a model with given flags, train and evaluate.
 def train_and_evaluate():
   """Run the full training and evaluation loop."""
   model = SharedKeyCrypto()
@@ -199,7 +212,7 @@ def train_and_evaluate():
     AB_steps = 0
     E_steps = 0
 
-    ITER = 3500
+    ITER = FLAGS.train_iter + FLAGS.attack_iter
     start_time = time.time()
     for j in xrange(1,ITER):
       #AB_err: how many bits Alice/Bob are not matching correctly in their generated key
@@ -212,7 +225,7 @@ def train_and_evaluate():
 
       #Run one step of Alice/Bob, then two steps of Eve.
       #Once we're halfway through the iteration count, fix Alice/Bob and let try attacking.
-      if j < ITER/2:
+      if j < FLAGS.train_iter:
         sess.run(model.train_AB)
       sess.run(model.train_E)
       if j % 50 == 1 or j==ITER-1:
